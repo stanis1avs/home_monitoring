@@ -1,0 +1,13 @@
+modules:
+  http_2xx:
+    prober: http
+    timeout: 5s
+    http:
+      method: GET
+      preferred_ip_protocol: ip4
+      follow_redirects: true
+      # Пусто = принимаем любые 2xx. Если какое-то приложение редиректит
+      # на /login и отдаёт, скажем, 401/403 без авторизации — добавь его
+      # код сюда, например: valid_status_codes: [200, 302, 401]
+      valid_status_codes: []
+      fail_if_ssl: false

@@ -1,0 +1,126 @@
+# Стек мониторинга для домашнего N30 — Фазы 0-3
+# Фаза 0: prometheus + grafana + node-exporter + cadvisor
+# Фаза 1: smartctl-exporter (SMART/здоровье дисков)
+# Фаза 2: intel-gpu-exporter (загрузка QuickSync)
+# Фаза 3: blackbox-exporter (доступность Immich/Navidrome/Jellyfin)
+#
+# Alertmanager + Go-бот = Фаза 5, здесь их ещё нет.
+
+name: monitoring
+
+networks:
+  monitoring:
+    driver: bridge
+
+volumes:
+  prometheus_data:
+  grafana_data:
+
+services:
+  # ─────────────────────────── ЯДРО ───────────────────────────
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    container_name: prometheus
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      # Тюнинг под маломощный бокс: держим ретеншн и по времени, и по размеру,
+      # чтобы Prometheus сам не забил диск, за которым следит.
+      - '--storage.tsdb.retention.time=30d'
+      - '--storage.tsdb.retention.size=8GB'
+      - '--web.enable-lifecycle'   # даёт reload конфига через POST /-/reload
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks: [monitoring]
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: grafana
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3000:3000"
+    networks: [monitoring]
+    depends_on: [prometheus]
+
+  # ─────────────────────── ФАЗА 0: железо + контейнеры ───────────────────────
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    container_name: node-exporter
+    restart: unless-stopped
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--path.rootfs=/rootfs'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+      # hwmon (температуры), diskstats, filesystem, meminfo, vmstat — включены по умолчанию
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    pid: host
+    networks: [monitoring]
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    container_name: cadvisor
+    restart: unless-stopped
+    privileged: true
+    devices:
+      - /dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    networks: [monitoring]
+
+  # ─────────────────────── ФАЗА 1: здоровье дисков ───────────────────────
+  smartctl-exporter:
+    image: prometheuscommunity/smartctl-exporter:v0.13.0
+    container_name: smartctl-exporter
+    restart: unless-stopped
+    privileged: true          # нужен для доступа к SMART физических дисков
+    user: root
+    networks: [monitoring]
+
+  # ─────────────────────── ФАЗА 2: iGPU / QuickSync ───────────────────────
+  # ВНИМАНИЕ: это самый капризный кусок. Community-образы intel-gpu-exporter
+  # меняются, имя метрики и порт стоит проверить после старта:
+  #   docker exec -it intel-gpu-exporter wget -qO- localhost:8080/metrics | head
+  # Если образ не заведётся — это единственный сервис, который можно временно
+  # выключить, остальной стек от него не зависит.
+  intel-gpu-exporter:
+    image: restreamio/intel-prometheus:latest
+    container_name: intel-gpu-exporter
+    restart: unless-stopped
+    privileged: true
+    devices:
+      - /dev/dri:/dev/dri
+    networks: [monitoring]
+
+  # ─────────────────────── ФАЗА 3: доступность сервисов ───────────────────────
+  blackbox-exporter:
+    image: prom/blackbox-exporter:v0.26.0
+    container_name: blackbox-exporter
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/blackbox/blackbox.yml'
+    volumes:
+      - ./blackbox/blackbox.yml:/etc/blackbox/blackbox.yml:ro
+    # host-gateway позволяет пробам достучаться до приложений, опубликованных
+    # на хосте (Immich/Navidrome/Jellyfin), без хардкода LAN-IP.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks: [monitoring]

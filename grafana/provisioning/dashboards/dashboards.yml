@@ -1,0 +1,13 @@
+apiVersion: 1
+providers:
+  - name: 'default'
+    orgId: 1
+    folder: ''
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/provisioning/dashboards
+# Готовые дашборды проще импортировать по ID через UI (см. README).
+# Если захочешь версионировать — клади сюда JSON-файлы дашбордов.

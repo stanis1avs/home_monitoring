@@ -1,0 +1,119 @@
+# Правила алертов. Пока Alertmanager не поднят (Фаза 5), они просто
+# горят в Prometheus UI → Alerts. Пороги подобраны разумно, но подкрути
+# под своё железо. Имена SMART-метрик и container_oom_events_total
+# зависят от версии экспортера — если алерт молчит, проверь метрику в UI.
+
+groups:
+  # ─────────────────── ДИСК (пункт 1 — самый важный) ───────────────────
+  - name: disk
+    rules:
+      - alert: DiskSpaceLow
+        expr: |
+          (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs"}
+           / node_filesystem_size_bytes) * 100 < 20
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "Мало места: {{ $labels.mountpoint }} на {{ $labels.instance }}"
+          description: "Свободно менее 20%. Immich/Jellyfin могут молча перестать писать."
+
+      - alert: DiskWillFillSoon
+        expr: |
+          predict_linear(node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs"}[6h], 7*24*3600) < 0
+          and (node_filesystem_avail_bytes / node_filesystem_size_bytes) * 100 < 30
+        for: 1h
+        labels: { severity: critical }
+        annotations:
+          summary: "Диск {{ $labels.mountpoint }} заполнится в течение недели"
+          description: "По тренду за последние 6ч места не хватит на 7 дней."
+
+  # ─────────────────── SMART / здоровье дисков ───────────────────
+  # ATA-диски. Для NVMe метрики называются иначе (smartctl_device_...nvme),
+  # при необходимости добавь отдельное правило.
+  - name: smart
+    rules:
+      - alert: SmartSectorsGrowing
+        expr: |
+          increase(smartctl_device_attribute{
+            attribute_name=~"Reallocated_Sector_Ct|Current_Pending_Sector|Offline_Uncorrectable",
+            attribute_value_type="raw"
+          }[1h]) > 0
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "SMART: растут бэд-сектора на {{ $labels.device }}"
+          description: "{{ $labels.attribute_name }} увеличился — диск деградирует, планируй замену и бэкап."
+
+      - alert: DiskTemperatureHigh
+        expr: smartctl_device_temperature{temperature_type="current"} > 50
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "Диск {{ $labels.device }} греется: {{ $value }}°C"
+
+  # ─────────────────── ТЕПЛО / ТРОТТЛИНГ (пункт 2) ───────────────────
+  - name: thermal
+    rules:
+      - alert: CpuTemperatureHigh
+        expr: node_hwmon_temp_celsius > 90
+        for: 3m
+        labels: { severity: warning }
+        annotations:
+          summary: "CPU горячий: {{ $value }}°C на {{ $labels.instance }}"
+          description: "Возможен троттлинг → заикания транскода в Jellyfin. Проверь охлаждение/пыль."
+      # Явный троттлинг ловится комбо «temp у потолка + падение частоты»:
+      # node_hwmon_temp_celsius высокая AND node_cpu_scaling_frequency_hertz упала.
+      # Отдельного счётчика троттлинга по-хорошему нет.
+
+  # ─────────────────── ПАМЯТЬ / SWAP (пункт 4) ───────────────────
+  - name: memory
+    rules:
+      - alert: SwapThrashing
+        # pswpout в страницах → *4096 = байт/с. Порог ~5 МБ/с.
+        expr: rate(node_vmstat_pswpout[5m]) * 4096 > 5 * 1024 * 1024
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "Активный свопинг на {{ $labels.instance }}"
+          description: "Пишем в swap >5 МБ/с 10 минут — не хватает RAM (частый виновник — ML-контейнер Immich). Всё тормозит."
+
+  # ─────────────────── КОНТЕЙНЕРЫ (пункт 6) ───────────────────
+  - name: containers
+    rules:
+      - alert: ContainerOOMKilled
+        expr: increase(container_oom_events_total[10m]) > 0
+        labels: { severity: critical }
+        annotations:
+          summary: "Контейнер {{ $labels.name }} убит по OOM"
+
+      - alert: ContainerRestartLoop
+        expr: changes(container_start_time_seconds{name!=""}[15m]) > 3
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Контейнер {{ $labels.name }} перезапускается в цикле"
+
+  # ─────────────────── ДОСТУПНОСТЬ (пункт 5) ───────────────────
+  - name: availability
+    rules:
+      - alert: ServiceDown
+        expr: probe_success == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "Сервис не отвечает: {{ $labels.instance }}"
+
+  # ─────────────────── iGPU (пункт 3) ───────────────────
+  # Раскомментируй и подставь реальное имя метрики после проверки
+  # эндпоинта intel-gpu-exporter (см. коммент в docker-compose.yml).
+  # - name: gpu
+  - name: gpu
+    rules:
+      - alert: IgpuVideoSaturated
+        # intel_gpu_top_video_0_busy — загрузка видео-движка (QuickSync декод/энкод), 0-100%
+        expr: intel_gpu_top_video_0_busy > 95
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "QuickSync загружен на 100% ({{ $value }}%) — риск буферинга в Jellyfin"
+          description: "Видео-движок iGPU упёрся в потолок 5+ минут. Если плейбек заикается — это транскод не тянет (слишком много одновременных стримов или тяжёлый кодек)."

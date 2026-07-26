@@ -1,0 +1,59 @@
+global:
+  scrape_interval: 30s      # не 15с — экономим CPU/диск на N30
+  scrape_timeout: 10s
+  evaluation_interval: 30s
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+# Фаза 5: раскомментируешь, когда поднимешь Alertmanager
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets: ['alertmanager:9093']
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # ── Фаза 0 ──
+  - job_name: node
+    static_configs:
+      - targets: ['node-exporter:9100']
+
+  - job_name: cadvisor
+    static_configs:
+      - targets: ['cadvisor:8080']
+
+  # ── Фаза 1 ── (SMART опрашиваем реже — он тяжёлый)
+  - job_name: smartctl
+    scrape_interval: 60s
+    static_configs:
+      - targets: ['smartctl-exporter:9633']
+
+  # ── Фаза 2 ── (порт проверь под свой образ, см. коммент в compose)
+  - job_name: intel-gpu
+    fallback_scrape_protocol: PrometheusText0.0.4
+    static_configs:
+      - targets: ['intel-gpu-exporter:8080']
+
+  # ── Фаза 3 ── проба доступности приложений через blackbox
+  # Порты по умолчанию: Immich 2283, Navidrome 4533, Jellyfin 8096.
+  # Поправь под свои, если публикуешь иначе.
+  - job_name: blackbox-http
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets:
+          - http://host.docker.internal:2283      # Immich
+          - http://host.docker.internal:65437      # Navidrome
+          - http://host.docker.internal:8096      # Jellyfin
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox-exporter:9115
