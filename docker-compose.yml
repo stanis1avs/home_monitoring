@@ -4,7 +4,7 @@
 # Фаза 2: intel-gpu-exporter (загрузка QuickSync)
 # Фаза 3: blackbox-exporter (доступность Immich/Navidrome/Jellyfin)
 #
-# Alertmanager + Go-бот = Фаза 5, здесь их ещё нет.
+# Фаза 5: Alertmanager + Go-бот (./bot) — доставка алертов в Telegram.
 
 name: monitoring
 
@@ -15,6 +15,7 @@ networks:
 volumes:
   prometheus_data:
   grafana_data:
+  alertmanager_data:   # состояние Alertmanager (silences, дедуп) между рестартами
 
 services:
   # ─────────────────────────── ЯДРО ───────────────────────────
@@ -124,3 +125,49 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks: [monitoring]
+
+  # ─────────────────── ФАЗА 5: доставка алертов в Telegram ───────────────────
+  # Alertmanager принимает алерты от Prometheus, группирует/дедуплицирует их
+  # и шлёт вебхуком нашему боту (см. alertmanager/alertmanager.yml).
+  alertmanager:
+    image: prom/alertmanager:v0.28.0
+    container_name: alertmanager
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    ports:
+      - "9093:9093"     # UI Alertmanager. Не нужен снаружи — можно убрать строку.
+    networks: [monitoring]
+    depends_on: [prometheus]
+
+  # Наш Go-бот: принимает вебхуки Alertmanager (порт 9095, ТОЛЬКО внутри сети)
+  # и пересылает алерты в Telegram; плюс отвечает на команды (/status, /top,
+  # /logs, /ps, /restart) через long-polling.
+  bot:
+    build: ./bot
+    container_name: bot
+    restart: unless-stopped
+    # Секреты (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID) — в отдельном ./bot/.env,
+    # НЕ в этом файле и НЕ в git. Скопируй bot/.env.example → bot/.env и заполни.
+    env_file:
+      - ./bot/.env
+    environment:
+      # TZ влияет на время в сообщениях (tzdata вшита в бинарь). Поменяй под себя.
+      - TZ=Europe/Moscow
+      - PROMETHEUS_URL=http://prometheus:9090
+      - WEBHOOK_LISTEN_ADDR=:9095
+      - DOCKER_HOST=unix:///var/run/docker.sock
+    volumes:
+      # Монтируем docker.sock БЕЗ :ro осознанно: флаг :ro ограничивает только
+      # файл сокета, но не операции через Docker API (рестарт всё равно прошёл
+      # бы) — то есть даёт ложную защиту. Нам рестарт нужен. Реальная защита —
+      # whitelist по TELEGRAM_CHAT_ID внутри бота.
+      - /var/run/docker.sock:/var/run/docker.sock
+    # Порт 9095 НАМЕРЕННО не публикуем (нет секции ports) — вебхук доступен
+    # только из сети monitoring, снаружи хоста его нет.
+    networks: [monitoring]
+    depends_on: [prometheus, alertmanager]

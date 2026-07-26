@@ -1,0 +1,39 @@
+# Alertmanager для домашнего стека (Фаза 5).
+# Задача простая: принять алерты от Prometheus, сгруппировать, убрать дубли
+# и отдать их вебхуком нашему Go-боту, который перешлёт в Telegram.
+#
+# Проверить конфиг после правок:
+#   docker exec alertmanager amtool check-config /etc/alertmanager/alertmanager.yml
+# (или просто docker compose restart alertmanager и глянуть логи)
+
+route:
+  # Группируем по имени алерта: если DiskSpaceLow сработал на трёх разделах,
+  # придёт одно сгруппированное сообщение, а не три отдельных.
+  group_by: ['alertname']
+
+  # group_wait: сколько ждать перед первым уведомлением по новой группе —
+  # даём Prometheus дособрать «пачку» родственных алертов (30с достаточно).
+  group_wait: 30s
+
+  # group_interval: как часто досылать апдейт по УЖЕ известной группе,
+  # если в ней появились новые алерты.
+  group_interval: 5m
+
+  # repeat_interval: как часто повторять напоминание о всё ещё горящем алерте.
+  # Дома 4 часа — разумно: не забудешь про проблему, но и не задолбает.
+  repeat_interval: 4h
+
+  # Единственный получатель — наш бот.
+  receiver: telegram-bot
+
+receivers:
+  - name: telegram-bot
+    webhook_configs:
+      # bot — DNS-имя контейнера в сети monitoring, 9095 — WEBHOOK_LISTEN_ADDR.
+      - url: 'http://bot:9095/webhook'
+        # send_resolved: true — присылать и уведомления о том, что алерт погас
+        # (в боте это ✅ resolved). Полезно знать, что проблема ушла сама.
+        send_resolved: true
+
+# inhibit_rules можно добавить позже: например, гасить warning, если по тому же
+# инстансу уже горит critical. Для старта не усложняем.
