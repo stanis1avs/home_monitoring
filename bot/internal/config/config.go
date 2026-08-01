@@ -27,6 +27,10 @@ type Config struct {
 	WebhookAddr string
 	// PrometheusURL — база Prometheus HTTP API для команд /status и /top.
 	PrometheusURL string
+	// ProxyURL — SOCKS5-прокси для доступа к Telegram API (формат socks5://host:port).
+	// Пусто = прямое подключение (локальная разработка). Нужен там, где Telegram
+	// заблокирован (РФ): бот ходит в api.telegram.org через локальный xray-прокси.
+	ProxyURL string
 }
 
 // Load собирает Config из окружения и валидирует обязательные поля.
@@ -37,6 +41,9 @@ func Load() (*Config, error) {
 		DockerHost:    getEnv("DOCKER_HOST", "unix:///var/run/docker.sock"),
 		WebhookAddr:   getEnv("WEBHOOK_LISTEN_ADDR", ":9095"),
 		PrometheusURL: getEnv("PROMETHEUS_URL", "http://prometheus:9090"),
+		// Прокси опционален — не задан значит прямое подключение. Валидируем
+		// сам URL уже при создании клиента (config не знает про http/proxy).
+		ProxyURL: os.Getenv("TELEGRAM_PROXY_URL"),
 	}
 
 	if cfg.TelegramToken == "" {

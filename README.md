@@ -110,7 +110,7 @@ curl -X POST http://localhost:9090/-/reload
   `docker exec -it intel-gpu-exporter wget -qO- localhost:8080/metrics | head`. Если не заводится — выключи, остальной стек от него не зависит.
 - **Имена SMART-метрик** зависят от версии экспортера и типа диска (ATA vs NVMe). Молчит алерт — глянь реальные метрики (`smartctl_...`) в Prometheus UI.
 - **`container_oom_events_total`** есть не во всех сборках cadvisor — проверь, если алерт по OOM не срабатывает.
-- **Telegram в РФ** — боту на N30 нужен доступ к `api.telegram.org` (обычно через VPN на самом хосте). Проверка: `curl -s -o /dev/null -w "%{http_code}" https://api.telegram.org` должен вернуть `200`.
+- **Telegram в РФ** — боту на N30 нужен доступ к `api.telegram.org` (обычно через VPN на самом хосте). Проверка связи: `curl -s -o /dev/null -w "%{http_code}" https://api.telegram.org` — сгодится любой HTTP-ответ (`200`/`302`), это значит TLS и канал работают; плохо только `000` или таймаут. Проверка токена: `curl -s "https://api.telegram.org/bot<ТОКЕН>/getMe"` должен вернуть `{"ok":true,...}`.
 
 ---
 

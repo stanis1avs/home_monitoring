@@ -161,12 +161,22 @@ services:
       - PROMETHEUS_URL=http://prometheus:9090
       - WEBHOOK_LISTEN_ADDR=:9095
       - DOCKER_HOST=unix:///var/run/docker.sock
+      # Telegram заблокирован в РФ → ходим в api.telegram.org через локальный
+      # SOCKS5-прокси (xray на хосте, слушает 0.0.0.0:10808). host.docker.internal
+      # указывает на хост из контейнера (см. extra_hosts ниже). Пусто/убрать —
+      # бот пойдёт напрямую (для окружений без блокировки).
+      - TELEGRAM_PROXY_URL=socks5://host.docker.internal:10808
     volumes:
       # Монтируем docker.sock БЕЗ :ro осознанно: флаг :ro ограничивает только
       # файл сокета, но не операции через Docker API (рестарт всё равно прошёл
       # бы) — то есть даёт ложную защиту. Нам рестарт нужен. Реальная защита —
       # whitelist по TELEGRAM_CHAT_ID внутри бота.
       - /var/run/docker.sock:/var/run/docker.sock
+    # host.docker.internal → IP хоста. На нативном Docker (Ubuntu, не Docker
+    # Desktop) это имя НЕ резолвится без этой строки — а прокси нам нужен именно
+    # по нему. host-gateway Docker подставляет как адрес шлюза до хоста.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     # Порт 9095 НАМЕРЕННО не публикуем (нет секции ports) — вебхук доступен
     # только из сети monitoring, снаружи хоста его нет.
     networks: [monitoring]

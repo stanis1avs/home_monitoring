@@ -11,11 +11,14 @@ import (
 	"fmt"
 	"html"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"golang.org/x/net/proxy"
 
 	"monbot/internal/config"
 	"monbot/internal/dockerx"
@@ -44,18 +47,92 @@ type Bot struct {
 
 // New подключается к Telegram (проверяет токен запросом getMe) и собирает Bot.
 func New(cfg *config.Config, prom *prometheus.Client, docker *dockerx.Docker, log *slog.Logger) (*Bot, error) {
-	// Таймаут HTTP-клиента ОБЯЗАН быть больше pollTimeout: long-polling держит
-	// соединение открытым до pollTimeout секунд, и если клиентский таймаут
-	// меньше — каждый опрос будет обрываться по таймауту.
-	httpClient := &http.Client{Timeout: (pollTimeout + 35) * time.Second}
+	// HTTP-клиент собираем отдельно: с SOCKS5-прокси, если он задан, иначе —
+	// прямое подключение (как при локальной разработке).
+	httpClient, err := buildHTTPClient(cfg.ProxyURL)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.ProxyURL != "" {
+		log.Info("Telegram через SOCKS5-прокси", "proxy", cfg.ProxyURL)
+	} else {
+		log.Info("Telegram — прямое подключение (без прокси)")
+	}
 
 	api, err := tgbotapi.NewBotAPIWithClient(cfg.TelegramToken, tgbotapi.APIEndpoint, httpClient)
 	if err != nil {
-		return nil, fmt.Errorf("подключение к Telegram (проверь токен и доступ к api.telegram.org): %w", err)
+		return nil, fmt.Errorf("подключение к Telegram (проверь токен, прокси и доступ к api.telegram.org): %w", err)
 	}
 	log.Info("подключились к Telegram", "bot", api.Self.UserName)
 
 	return &Bot{api: api, cfg: cfg, prom: prom, docker: docker, log: log}, nil
+}
+
+// buildHTTPClient создаёт http.Client для Telegram API.
+//
+// Если proxyURL пуст — обычный клиент с прямым подключением (транспорт по
+// умолчанию). Если задан socks5:// — заворачиваем весь TCP-трафик клиента
+// в SOCKS5-прокси (у нас это локальный xray на хосте, туннелирующий на VPS).
+//
+// Таймаут клиента ОБЯЗАН быть больше pollTimeout: long-polling держит соединение
+// открытым до pollTimeout секунд, и при меньшем таймауте каждый опрос обрывался бы.
+func buildHTTPClient(proxyURL string) (*http.Client, error) {
+	client := &http.Client{Timeout: (pollTimeout + 35) * time.Second}
+
+	if proxyURL == "" {
+		return client, nil // прокси не задан — прямое подключение
+	}
+
+	u, err := url.Parse(proxyURL)
+	if err != nil {
+		return nil, fmt.Errorf("некорректный TELEGRAM_PROXY_URL %q: %w", proxyURL, err)
+	}
+	// Поддерживаем только SOCKS5 (socks5h = то же самое, но с явным намёком на
+	// удалённый резолв — для нас поведение одинаковое, см. ниже про DNS).
+	if u.Scheme != "socks5" && u.Scheme != "socks5h" {
+		return nil, fmt.Errorf("TELEGRAM_PROXY_URL: поддерживается только socks5://, получено %q", u.Scheme)
+	}
+
+	// Логин/пароль к прокси, если заданы в URL (socks5://user:pass@host:port).
+	// У локального xray их обычно нет — тогда auth = nil.
+	var auth *proxy.Auth
+	if u.User != nil {
+		password, _ := u.User.Password()
+		auth = &proxy.Auth{User: u.User.Username(), Password: password}
+	}
+
+	// proxy.SOCKS5 создаёт «диалер»: объект, который вместо прямого соединения
+	// сначала подключается к SOCKS5-прокси (u.Host), а затем просит прокси
+	// открыть TCP-соединение до нужного адреса. proxy.Direct — базовый диалер,
+	// которым обёртка ходит до самого прокси (обычный net.Dial до host:10808).
+	dialer, err := proxy.SOCKS5("tcp", u.Host, auth, proxy.Direct)
+	if err != nil {
+		return nil, fmt.Errorf("не удалось создать SOCKS5-диалер (%s): %w", u.Host, err)
+	}
+
+	// http.Transport хочет DialContext(ctx, network, addr) — с поддержкой отмены
+	// по контексту. Диалер из x/net/proxy реализует proxy.ContextDialer, поэтому
+	// используем его DialContext; на всякий случай оставляем фолбэк на Dial.
+	dialContext := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if cd, ok := dialer.(proxy.ContextDialer); ok {
+			return cd.DialContext(ctx, network, addr)
+		}
+		return dialer.Dial(network, addr)
+	}
+
+	// ВАЖНО про DNS и IPv6: сюда addr приходит как "api.telegram.org:443" —
+	// именно ИМЕНЕМ, http.Transport его не резолвит. SOCKS5-диалер передаёт это
+	// имя самому прокси (тип адреса SOCKS5 = domain), и резолвит его xray на той
+	// стороне. То есть контейнер вообще НЕ делает DNS-запрос к Telegram — значит
+	// проблема «внутри контейнера отдаёт AAAA/IPv6 и виснет» тут не возникает,
+	// и принудительный tcp4 не нужен. Единственное прямое соединение — контейнер
+	// → host.docker.internal:10808 — идёт через IPv4 (host-gateway из compose).
+	client.Transport = &http.Transport{
+		DialContext:       dialContext,
+		ForceAttemptHTTP2: true, // как у http.DefaultTransport — HTTP/2 к Telegram
+	}
+
+	return client, nil
 }
 
 // Run запускает цикл обработки апдейтов. Блокируется до отмены ctx
